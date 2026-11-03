@@ -70,6 +70,15 @@
         <tr><td>تنفيذ الأوامر</td><td align="left">يدوي فقط</td></tr>
       </table>
     </div>
+  <div class="card wide" id="marketScanner">
+  <h2>🤖 AI MARKET SCANNER</h2>
+  <p class="note">
+    ماسح ذكي لتحليل العملات الرقمية على Binance Futures
+  </p>
+  <button id="scanMarket">🔍 ابدأ فحص السوق</button>
+  <div id="scannerStatus" class="note">جاهز لفحص السوق</div>
+  <div id="scannerResults"></div>
+  </div>
   </section>
   <div class="card note"><b style="color:#f2c66d">تنبيه مهم:</b> هذه نسخة أولية للاختبار وليست روبوتاً ربحياً أو مستشاراً مالياً. التحليل مبني على RSI وEMA وتقلب ATR بصورة مبسطة، ولا يضمن نجاح الإشارة. الأسعار والبيانات قد تتأخر أو ينقطع الاتصال. لا تنفذ صفقة حقيقية اعتماداً على هذه الإشارة وحدها. احتسب الرسوم والانزلاق السعري والتصفية والهامش، واختبر على حساب تجريبي أولاً. لا تدخل مفاتيح API أو كلمات مرور في هذا التطبيق.</div>
   <div class="footer">AI Crypto Trader · Prototype v0.1 · بيانات عامة فقط · لا ينفذ صفقات</div>
@@ -132,5 +141,247 @@ async function analyze(){
 }
 $('analyze').addEventListener('click',analyze);
 if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));
+// ===== AI MARKET SCANNER =====
+
+const scannerEMA = (data, period) => {
+  const k = 2 / (period + 1);
+  let value = data[0];
+  for (let i = 1; i < data.length; i++) {
+    value = data[i] * k + value * (1 - k);
+  }
+  return value;
+};
+
+const scannerRSI = (data, period = 14) => {
+  let gains = 0, losses = 0;
+  for (let i = data.length - period; i < data.length; i++) {
+    const change = data[i] - data[i - 1];
+    if (change > 0) gains += change;
+    else losses -= change;
+  }
+  if (losses === 0) return 100;
+  return 100 - 100 / (1 + gains / losses);
+};
+
+const scannerATR = (candles, period = 14) => {
+  const trs = [];
+  for (let i = 1; i < candles.length; i++) {
+    const high = Number(candles[i][2]);
+    const low = Number(candles[i][3]);
+    const previous = Number(candles[i - 1][4]);
+    trs.push(Math.max(high - low, Math.abs(high - previous),
+      Math.abs(low - previous)));
+  }
+  return trs.slice(-period).reduce((a, b) => a + b, 0) / period;
+};
+
+async function runMarketScanner() {
+  const button = $('scanMarket');
+  const status = $('scannerStatus');
+  const results = $('scannerResults');
+
+  button.disabled = true;
+  status.textContent = '⏳ جاري تحميل بيانات Binance Futures...';
+  results.innerHTML = '';
+
+  try {
+    const [exchangeResponse, tickerResponse] = await Promise.all([
+      fetch(api + '/fapi/v1/exchangeInfo'),
+      fetch(api + '/fapi/v1/ticker/24hr')
+    ]);
+
+    if (!exchangeResponse.ok || !tickerResponse.ok) {
+      throw new Error('تعذر الاتصال بواجهة Binance');
+    }
+
+    const exchange = await exchangeResponse.json();
+    const tickers = await tickerResponse.json();
+
+    const allowed = new Set(
+      exchange.symbols
+        .filter(s => s.status === 'TRADING' &&
+          s.contractType === 'PERPETUAL' &&
+          s.quoteAsset === 'USDT')
+        .map(s => s.symbol)
+    );
+
+    const coins = tickers
+      .filter(t => allowed.has(t.symbol))
+      .sort((a, b) =>
+        Number(b.quoteVolume) - Number(a.quoteVolume))
+      .slice(0, 30);
+
+    status.textContent =
+      '🔍 جاري تحليل ' + coins.length + ' عملة...';
+
+    const signals = [];
+    let completed = 0;
+    let nextIndex = 0;
+
+    async function analyzeCoin(coin) {
+      try {
+        const response = await fetch(
+          api + '/fapi/v1/klines?symbol=' +
+          encodeURIComponent(coin.symbol) +
+          '&interval=1h&limit=100'
+        );
+
+        if (!response.ok) return;
+
+        const candles = await response.json();
+        if (!Array.isArray(candles) || candles.length < 60) return;
+
+        const closes = candles.map(c => Number(c[4]));
+        const price = closes[closes.length - 1];
+
+        const ema9 = scannerEMA(closes.slice(-40), 9);
+        const ema20 = scannerEMA(closes.slice(-60), 20);
+        const ema50 = scannerEMA(closes.slice(-100), 50);
+
+        const rsi = scannerRSI(closes, 14);
+        const atr = scannerATR(candles, 14);
+
+        const macdLine = [];
+        for (let i = 25; i < closes.length; i++) {
+          const values = closes.slice(0, i + 1);
+          macdLine.push(
+            scannerEMA(values, 12) - scannerEMA(values, 26)
+          );
+        }
+
+        const macd = macdLine[macdLine.length - 1];
+const signalLine = scannerEMA(macdLine, 9);
+        const histogram = macd - signalLine;
+
+        const bullish = price > ema20 && ema20 > ema50;
+        const bearish = price < ema20 && ema20 < ema50;
+
+        let side = '';
+        let score = 0;
+
+        if (bullish) {
+          if (rsi >= 50 && rsi <= 70) score++;
+          if (histogram > 0) score++;
+          if (ema9 > ema20) score++;
+          if (price > ema9) score++;
+          side = 'LONG';
+        } else if (bearish) {
+          if (rsi >= 30 && rsi <= 50) score++;
+          if (histogram < 0) score++;
+          if (ema9 < ema20) score++;
+          if (price < ema9) score++;
+          side = 'SHORT';
+        }
+
+        if (!side || score < 3 || atr <= 0) return;
+
+        const stopDistance = atr * 1.5;
+        const stop = side === 'LONG'
+          ? price - stopDistance : price + stopDistance;
+        const target1 = side === 'LONG'
+          ? price + stopDistance : price - stopDistance;
+        const target2 = side === 'LONG'
+          ? price + stopDistance * 2 : price - stopDistance * 2;
+
+        signals.push({
+          symbol: coin.symbol,
+          side,
+          score,
+          price,
+          rsi,
+          ema20,
+          ema50,
+          atr,
+          stop,
+          target1,
+          target2,
+          volume: Number(coin.quoteVolume)
+        });
+      } catch (error) {
+        // تخطي العملة عند فشل تحميل بياناتها
+      }
+    }
+
+    async function worker() {
+      while (nextIndex < coins.length) {
+        const coin = coins[nextIndex++];
+        await analyzeCoin(coin);
+        completed++;
+        status.textContent =
+          '⏳ تم تحليل ' + completed + ' من ' +
+          coins.length + ' عملة...';
+      }
+    }
+
+    await Promise.all([
+      worker(), worker(), worker(), worker()
+    ]);
+
+    signals.sort((a, b) =>
+      b.score - a.score || b.volume - a.volume
+    );
+
+    const top = signals.slice(0, 10);
+
+    if (!top.length) {
+      results.innerHTML =
+        '<p class="note">لم نجد فرصاً تستوفي شروط التحليل حالياً. حاول لاحقاً.</p>';
+      status.textContent = 'اكتمل الفحص؛ لا توجد إشارات قوية.';
+      return;
+    }
+
+    const fmt = n => Number(n).toPrecision(7);
+
+    results.innerHTML = `
+      <h3>🏆 أفضل ${top.length} فرص محتملة</h3>
+      <div style="overflow-x:auto">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>العملة</th>
+            <th>الاتجاه</th>
+            <th>القوة</th>
+            <th>RSI</th>
+            <th>الدخول</th>
+            <th>وقف الخسارة</th>
+            <th>الهدف 1</th>
+            <th>الهدف 2</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${top.map(s => `
+            <tr>
+              <td>${s.symbol}</td>
+              <td style="color:${s.side === 'LONG' ? '#22c55e' : '#ef4444'}">
+                ${s.side}
+              </td>
+              <td>${s.score}/4</td>
+              <td>${s.rsi.toFixed(1)}</td>
+              <td>${fmt(s.price)}</td>
+              <td>${fmt(s.stop)}</td>
+              <td>${fmt(s.target1)}</td>
+              <td>${fmt(s.target2)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      </div>
+      <p class="note">الإطار الزمني: ساعة واحدة | المؤشرات: EMA وRSI وMACD وATR.</p>
+    `;
+
+    status.textContent =
+      '✅ اكتمل الفحص: ' + coins.length +
+      ' عملة، ووجدنا ' + signals.length + ' فرصة محتملة.';
+
+  } catch (error) {
+    status.textContent = '❌ حدث خطأ: ' + error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$('scanMarket').addEventListener('click', runMarketScanner);
+
+// ===== END AI MARKET SCANNER =====
 </script>
 </body></html>
