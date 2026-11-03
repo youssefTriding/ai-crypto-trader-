@@ -1,0 +1,14 @@
+{
+  "name": "AI Crypto Trader",
+  "short_name": "AI Trader",
+  "description": "مساعد تحليل تجريبي لبيانات Binance Futures",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b1420",
+  "theme_color": "#101d29",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": [{"src":"icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]
+}
